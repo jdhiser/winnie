@@ -1,10 +1,54 @@
 #include "pin.H"
+
+#ifdef WINDOWS
 #define _WINDOWS_H_PATH_ C:/Program Files (x86)/Windows Kits/10/Include/10.0.18362.0/um
 namespace W {
 #include <Windows.h>
 };
-W::HANDLE current_process;
 
+#else
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdarg.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <errno.h>
+#include <execinfo.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+
+#include <fcntl.h>
+
+ void print_backtrace(void){
+
+       void *tracePtrs[10];
+       size_t count;
+
+       count = backtrace(tracePtrs, 10);
+
+       char** funcNames = backtrace_symbols(tracePtrs, count);
+
+       for (int i = 0; i < count; i++)
+           printf("%s\n", funcNames[i]);
+
+       free(funcNames);
+
+}
+
+#endif
+
+#define MAXPATH 0x1000
+#ifdef WINDOWS
+W::HANDLE current_process;
+#define DIR_SEP "\\"
+#else
+#define DIR_SEP "/"
+int current_process = -1;
+#endif // !windows
 enum {
 	UNIQUE, RELATION, ALL, INDIRECT, DOMINATOR
 } trace_mode;
@@ -19,9 +63,9 @@ typedef enum {
 #define BUFFER_SIZE_ELEMENTS(buf)   (BUFFER_SIZE_BYTES(buf) / sizeof((buf)[0]))
 #define BUFFER_LAST_ELEMENT(buf)    (buf)[BUFFER_SIZE_ELEMENTS(buf) - 1]
 
-int tracemode;
+int tracemode = ALL;
 
-#define VNOTIFY(level, msg, ...)
+#define VNOTIFY(level, msg, ...) 
 
 #define MAX_PTR_DEPTH 4
 
@@ -157,9 +201,25 @@ int memory_size = 4;
 #endif
 
 void print_sp(ADDRINT addr);
+#ifdef X64
+	#ifdef WINDOWS
+		#define PASSARGS RCX, RDX, R8, R9
+		#define DECLAREARGS app_pc RCX, app_pc RDX, app_pc R8, app_pc R9
+		#define PINARGS IARG_REG_VALUE, REG_RCX, IARG_REG_VALUE, REG_RDX, IARG_REG_VALUE, REG_R8, IARG_REG_VALUE, REG_R9
+	#else
+		#define PASSARGS RDI, RSI, RDX, RCX, R8, R9
+		#define DECLAREARGS app_pc RDI, app_pc RSI, app_pc RDX, app_pc RCX, app_pc R8, app_pc R9
+		#define PINARGS IARG_REG_VALUE, REG_RDI, IARG_REG_VALUE, REG_RSI, IARG_REG_VALUE, REG_RDX, IARG_REG_VALUE, REG_RCX, IARG_REG_VALUE, REG_R8, IARG_REG_VALUE, REG_R9
+	#endif
+#else
+	// we don't need to pass/declare/ask pin to send us any extra registers for x86-32.
+	#define PASSARGS 
+	#define DECLAREARGS 
+	#define PINARGS 
+#endif
 
 using namespace std;
-vector<pair<int, ptr_uint_t>> print_args(ADDRINT RSP, int count, int tid);
+vector<pair<int, ptr_uint_t>> print_args(app_pc RSP, int count, int tid, DECLAREARGS);
 bool fast_safe_read(void* base, size_t size, void* out_buf, size_t* outsize);
 void print_pointer_arrow(drltrc_pointer_type_t type);
 bool print_if_printable(ADDRINT addr, int tid);
@@ -208,7 +268,7 @@ CallListMap& calllist_map_() {
 
 void insert_calllist(app_pc addr, vector<pair<int, ptr_uint_t>> data) {
 	//FIXME: check x64 case 
-	//fprintf(outf, "insert %x\n", addr);
+	fprintf(outf, "insert %x\n", addr);
 	//last_addr = (app_pc)addr+6;
 	calls.insert(make_pair(addr, data));
 }
@@ -392,10 +452,17 @@ static drltrc_pointer_type_t _is_pointer(ptr_uint_t arg_val, int sz)
 	/* arg_val is a pointer */
 	if (ret) {
 		if (is_code_pointer(arg_val))
+		{
+			//printf("Returning data pointer\n");
 			return DRLTRC_CODE_POINTER;
+		}
 		else
+		{
+			//printf("Returning data pointer\n");
 			return DRLTRC_DATA_POINTER;
+		}
 	}
+	printf("Returning none pointer\n");
 	return DRLTRC_NONE_POINTER;
 }
 
@@ -431,10 +498,10 @@ static void print_mod_and_symbol(void* drcontext, ptr_uint_t addr)
 		fprintf(outf, "[!%s]", sym.c_str());
 	}
 	else if (!modname.empty() && sym.empty()) {
-		fprintf(outf, "[%s!unknown_symbol]", modname);
+		fprintf(outf, "[%s!unknown_symbol]", modname.c_str());
 	}
 	else {
-		fprintf(outf, "");
+		// fprintf(outf, ""); // no-op?
 	}
 }
 
@@ -459,7 +526,7 @@ static void print_structure(void* drcontext, ptr_uint_t addr, int sz, int level,
 		ptr_uint_t deref = 0;
 		bool flag = fast_safe_read((void*)addr, sz, &deref, NULL);
 		if (flag && level < MAX_PTR_DEPTH) {
-			fprintf(outf, " => " "%p", deref);
+			fprintf(outf, " => " "%p", (void*)deref);
 			print_structure(drcontext, deref, sz, level + 1, addr);
 		}
 	}
@@ -471,7 +538,21 @@ bool fast_safe_read(void* base, size_t size, void* out_buf, size_t* outsize)
 	 * to pay the cost of the syscall (DrMemi#265).
 	 */
 	bool res = true;
+#ifdef WINDOWS
 	res = !!W::ReadProcessMemory(current_process, base, out_buf, size, (W::SIZE_T*)outsize);
+#else
+	if(lseek(current_process, (off_t)base, SEEK_SET) != (off_t)base)
+	{
+		return false;
+	}
+	const auto bytesRead = read(current_process, out_buf, size) ;
+	if(bytesRead == -1)
+	{
+		return false;
+	}
+	if(outsize)
+		*outsize=bytesRead;
+#endif
 	return res;
 }
 
@@ -507,7 +588,7 @@ static void print_two_modules(app_pc inst_addr, app_pc target_addr)
 	auto pair = modname1 + "--" + modname2;
 
 	if (!dlls.count(pair)) {
-		char* remove_str = ":\\windows"; // use windows default path
+		char* remove_str = ":" DIR_SEP "windows"; // use windows default path
 		if (strcasestr(modname1.c_str(), remove_str) == NULL && strcasestr(modname2.c_str(), remove_str) == NULL) {
 			fprintf(outf, "%s\n", modname2.c_str());
 		}
@@ -588,8 +669,9 @@ static char* get_symbol_at_addr(app_pc addr)
 }
 
 
-static void PIN_FAST_ANALYSIS_CALL at_call(app_pc instr_addr, app_pc target_addr, app_pc RSP, int tid, app_pc next_addr)
+static void PIN_FAST_ANALYSIS_CALL at_call(app_pc instr_addr, app_pc target_addr, app_pc RSP, int tid, app_pc next_addr, DECLAREARGS)
 {
+	// fprintf(outf, "# call %p -> %p\n", instr_addr,target_addr);
 	if (tracemode == RELATION) {
 		if (addr_belongs_module(instr_addr) || addr_belongs_module(target_addr))
 			print_two_modules(instr_addr, target_addr);
@@ -621,7 +703,7 @@ static void PIN_FAST_ANALYSIS_CALL at_call(app_pc instr_addr, app_pc target_addr
 				tid = print_thread_id(tid, true);
 				print_address(instr_addr, name, false);
 				print_address(target_addr, "->", true);
-				vector<pair<int, ptr_uint_t>> dumped = print_args(RSP, 10, tid);
+				vector<pair<int, ptr_uint_t>> dumped = print_args(RSP, 10, tid, PASSARGS);
 				insert_calllist(next_addr, dumped);
 				//PIN_MutexUnlock(&as_built_lock);
 			}
@@ -666,7 +748,7 @@ static void PIN_FAST_ANALYSIS_CALL at_call(app_pc instr_addr, app_pc target_addr
 			print_sp(RSP);
 
 			if (dump) {
-				print_args(RSP, 10, tid);
+				print_args(RSP, 10, tid, PASSARGS);
 				return_candidate.push_back(instr_addr);
 			}
 			else {
@@ -680,8 +762,9 @@ static void PIN_FAST_ANALYSIS_CALL at_call(app_pc instr_addr, app_pc target_addr
 	}
 }
 
-static void PIN_FAST_ANALYSIS_CALL at_call_ind(app_pc instr_addr, app_pc target_addr, app_pc RSP, int tid, app_pc next_addr)
+static void PIN_FAST_ANALYSIS_CALL at_call_ind(app_pc instr_addr, app_pc target_addr, app_pc RSP, int tid, app_pc next_addr, DECLAREARGS)
 {
+	// fprintf(outf, "# call_ind %p -> %p\n", instr_addr,target_addr);
 	app_pc ret_addr;
 	//fprintf(outf, "at_call_ind\n");    
 
@@ -716,7 +799,7 @@ static void PIN_FAST_ANALYSIS_CALL at_call_ind(app_pc instr_addr, app_pc target_
 				print_address(instr_addr, name, false);
 				print_address(target_addr, "->", true);
 
-				vector<pair<int, ptr_uint_t>> dumped = print_args(RSP, 10, tid);
+				vector<pair<int, ptr_uint_t>> dumped = print_args(RSP, 10, tid, PASSARGS);
 				insert_calllist(next_addr, dumped);
 			}
 		}
@@ -760,7 +843,7 @@ static void PIN_FAST_ANALYSIS_CALL at_call_ind(app_pc instr_addr, app_pc target_
 			print_sp(RSP);
 			//print_args(10, tid);
 			if (dump) {
-				print_args(RSP, 10, tid);
+				print_args(RSP, 10, tid, PASSARGS);
 				return_candidate.push_back(instr_addr);
 			}
 			else {
@@ -773,8 +856,9 @@ static void PIN_FAST_ANALYSIS_CALL at_call_ind(app_pc instr_addr, app_pc target_
 	}
 }
 
-static void PIN_FAST_ANALYSIS_CALL at_jmp_ind(app_pc instr_addr, app_pc target_addr, ADDRINT RSP, int tid)
+static void PIN_FAST_ANALYSIS_CALL at_jmp_ind(app_pc instr_addr, app_pc target_addr, ADDRINT RSP, int tid, DECLAREARGS)
 {
+	// fprintf(outf, "# jmp_ind %p -> %p\n", instr_addr,target_addr);
 	app_pc ret_addr;
 	//fprintf(outf, "at_jmp_ind\n");    
 
@@ -810,7 +894,7 @@ static void PIN_FAST_ANALYSIS_CALL at_jmp_ind(app_pc instr_addr, app_pc target_a
 				tid = print_thread_id(tid, true);
 				print_address(instr_addr, name, false);
 				print_address(target_addr, "->", true);
-				vector<pair<int, ptr_uint_t>> dumped = print_args(10, tid, ret_addr);
+				vector<pair<int, ptr_uint_t>> dumped = print_args(RSP, 10, tid, PASSARGS);
 				insert_calllist(ret_addr, dumped);
 
 				//PIN_MutexUnlock(&as_built_lock);
@@ -854,7 +938,7 @@ static void PIN_FAST_ANALYSIS_CALL at_jmp_ind(app_pc instr_addr, app_pc target_a
 			print_sp(RSP);
 			//print_args(10, tid);
 			if (dump) {
-				print_args(RSP, 10, tid);
+				print_args(RSP, 10, tid, PASSARGS);
 				return_candidate.push_back(instr_addr);
 			}
 			else {
@@ -888,6 +972,7 @@ bool return_to_candidate(app_pc target_addr) {
 
 static void PIN_FAST_ANALYSIS_CALL at_return(app_pc instr_addr, app_pc target_addr, ADDRINT RSP, ADDRINT RAX, int tid)
 {
+	// fprintf(outf, "# ret %p -> %p\n", instr_addr,target_addr);
 	if (tracemode == RELATION) {
 		if (addr_belongs_module(instr_addr) || addr_belongs_module(target_addr))
 			print_two_modules(instr_addr, target_addr);
@@ -1028,7 +1113,7 @@ void check_pointer_wholepage(int arg_index, int cid, int tid, char* fix) {
 
 		addr = ((ptr_uint_t*)(safe_buf + i));
 		//fprintf(outf, "%x ", *test);
-		result = fast_safe_read((void*)* addr, 4, (void*)& deref, NULL);
+		result = fast_safe_read((void*)* addr, sizeof(addr), (void*)& deref, NULL);
 		if (result) {
 			_type = _is_pointer(*addr, memory_size);
 			if (_type == DRLTRC_CODE_POINTER) {
@@ -1039,11 +1124,11 @@ void check_pointer_wholepage(int arg_index, int cid, int tid, char* fix) {
 
 				// dump the second level pointer
 				if (i < second_level_elements && cid >= 0) {
-					sprintf(memdump_pn, "%s\\memdump\\t%d-c%d-a%d-%s", logdir.c_str(), tid, cid, arg_index, fix);
+					sprintf(memdump_pn, "%s" DIR_SEP "memdump" DIR_SEP "t%d-c%d-a%d-%s", logdir.c_str(), tid, cid, arg_index, fix);
 					OS_MkDir(memdump_pn, 0777);
 					fast_safe_read((void*)* addr, pagesize, safe_buf2, NULL);
 
-					sprintf(out_pn, "%s\\%d", memdump_pn, i);
+					sprintf(out_pn, "%s" DIR_SEP "%d", memdump_pn, i);
 					FILE* out_fp = fopen(out_pn, "wb");
 					fwrite(safe_buf2, 1, pagesize, out_fp);
 					fclose(out_fp);
@@ -1083,9 +1168,9 @@ void dump_address(ptr_uint_t addr, int arg_index, int cid, int tid) {
 	result = fast_safe_read((void*)addr, pagesize, safe_buf, &bytes_read);
 	check_pointer_wholepage(arg_index, cid, tid, fix);
 
-	// store to file (e.g., memdump\\c1-a1.bin)    
-	sprintf(out_pn, "memdump\\t%d-c%d-a%d.%s", tid, current_callid, arg_index, fix);
-	FILE* out_fp = fopen((logdir + "\\" + out_pn).c_str(), "wb");
+	// store to file (e.g., memdump" DIR_SEP "c1-a1.bin)    
+	sprintf(out_pn, "memdump" DIR_SEP "t%d-c%d-a%d.%s", tid, current_callid, arg_index, fix);
+	FILE* out_fp = fopen((logdir + DIR_SEP + out_pn).c_str(), "wb");
 	fwrite(safe_buf, 1, pagesize, out_fp);
 	fwrite(safe_buf_pointer, 1, pagesize / 4, out_fp);
 	fclose(out_fp);
@@ -1151,7 +1236,7 @@ char* should_access_and_print(ptr_uint_t arg, int index, int tid, ADDRINT* addr)
 	return NULL;
 }
 
-bool access_and_print(ptr_uint_t arg, int index, int tid, ADDRINT* addr) {
+bool access_and_print(ptr_uint_t arg, int index, int tid, ADDRINT* _unused_addr) {
 	bool rst = false;
 	char s_buf[0x101];
 	char s_out[0x101];
@@ -1174,15 +1259,15 @@ bool access_and_print(ptr_uint_t arg, int index, int tid, ADDRINT* addr) {
 	bool has_datapointer = false;
 
 	//FIXME: make it as a function        
-	result = fast_safe_read((void*)arg, 4, &deref, NULL);
+	result = fast_safe_read((void*)arg, sizeof(arg), &deref, NULL);
 	fprintf(outf, " -A%d: ""%p""", index, arg);
 	if (result) {
-		if (ret.length() == 4)
+		if (ret.length() == sizeof(arg))
 			fprintf(outf, " (str:%s)", ret.c_str());
 	}
 
 	// 1st dereference
-	result = fast_safe_read((void*)arg, 4, &deref, NULL);
+	result = fast_safe_read((void*)arg, sizeof(arg), &deref, NULL);
 	if (result) {
 		drltrc_pointer_type_t _type = _is_pointer(arg, memory_size);
 		print_pointer_arrow(_type);
@@ -1198,7 +1283,7 @@ bool access_and_print(ptr_uint_t arg, int index, int tid, ADDRINT* addr) {
 
 		fprintf(outf, " > " "%p", deref);
 		ret = is_printable((ptr_uint_t)deref);
-		if (ret.length() == 4) {
+		if (ret.length() == sizeof(arg)) {
 			if (deref > 0)
 				fprintf(outf, " (str:%s)", ret.c_str());
 		}
@@ -1207,13 +1292,13 @@ bool access_and_print(ptr_uint_t arg, int index, int tid, ADDRINT* addr) {
 	// 2nd dereference
 	next_arg = deref;
 	deref = 0;
-	result = fast_safe_read((void*)next_arg, 4, &deref, NULL);
+	result = fast_safe_read((void*)next_arg, sizeof(arg), &deref, NULL);
 	if (result) {
 		drltrc_pointer_type_t _type = _is_pointer((ptr_uint_t)next_arg, memory_size);
 		print_pointer_arrow(_type);
 		fprintf(outf, " > " "%p", deref);
 		ret = is_printable((ptr_uint_t)deref);
-		if (ret.length() == 4) {
+		if (ret.length() == sizeof(arg)) {
 			if (deref > 0)
 				fprintf(outf, " (str:%s)", ret.c_str());
 		}
@@ -1222,13 +1307,13 @@ bool access_and_print(ptr_uint_t arg, int index, int tid, ADDRINT* addr) {
 	// 3rd dereference
 	next_arg = deref;
 	deref = 0;
-	result = fast_safe_read((void*)next_arg, 4, &deref, NULL);
+	result = fast_safe_read((void*)next_arg, sizeof(arg), &deref, NULL);
 	if (result) {
 		drltrc_pointer_type_t _type = _is_pointer((ptr_uint_t)next_arg, memory_size);
 		print_pointer_arrow(_type);
 		fprintf(outf, " > " "%p", deref);
 		ret = is_printable((ptr_uint_t)deref);
-		if (ret.length() == 4) {
+		if (ret.length() == sizeof(arg)) {
 			if (deref > 0)
 				fprintf(outf, " (str:%s)", ret.c_str());
 		}
@@ -1257,51 +1342,49 @@ void print_sp(ADDRINT addr) {
 	fprintf(outf, "SP: ""%p"" -> ""%p""\n", addr, arg);
 }
 
-vector<pair<int, ptr_uint_t>> print_args(app_pc RSP, int count, int tid) {
-	//void print_args (int count){
-	ADDRINT* addr;
-	void* arg;
-	bool result = false;
-	vector<pair<int, ptr_uint_t>> dumped_args;
+vector<pair<int, ptr_uint_t>> print_args(app_pc RSP, int count, int tid, DECLAREARGS) 
+{
+	auto dumped_args = vector<pair<int, ptr_uint_t>> ();
+	auto arg_count=0;
 
-#ifdef X64 //windows x64 
-	fprintf(outf, "  - ARG%d: ""%p""\n", 0, mc.rcx);
-	fprintf(outf, "  - ARG%d: ""%p""\n", 1, mc.rdx);
-	fprintf(outf, "  - ARG%d: ""%p""\n", 2, mc.r8);
-	fprintf(outf, "  - ARG%d: ""%p""\n", 3, mc.r9);
-
-	for (int i = 4; i < count; i++) {
-		addr = (reg_t*)(mc.xsp + (i + 0) * sizeof(reg_t));
-		fast_safe_read(addr, sizeof(arg), &arg);
-		fprintf(outf, "  - ARG%d: ""%p""\n", i, arg);
-	}
-#else  // windows x86
-	dumped_args.push_back(make_pair(-1, get_callnum(tid)));
-	for (int i = 0; i < count; i++) {
-		arg = nullptr;
-		addr = (ADDRINT*)(RSP + (i + 0) * sizeof(ADDRINT));
-		fast_safe_read(addr, sizeof(arg), &arg, nullptr);
-		result = access_and_print((ptr_uint_t)arg, i, tid, addr);
+	auto handleParam=[&](app_pc paramValue, ADDRINT* addrValue=nullptr) 
+	{
+		// fprintf(outf, "  - ARG%d: %p", arg_count, paramValue);
+		auto result = access_and_print(static_cast<ptr_uint_t>(paramValue), arg_count, tid, addrValue);
 		if (result == true) {
-			dumped_args.push_back(make_pair(i, (ptr_uint_t)arg));
+			dumped_args.push_back(make_pair(arg_count, static_cast<ptr_uint_t>(paramValue)));
 		}
 		fprintf(outf, "\n");
-	}
+		arg_count++;
+	};
+	dumped_args.push_back(make_pair(-1, get_callnum(tid)));
+#ifdef X64 //windows x64 
+#ifdef WINDOWS
+	handleParam(RCX);
+	handleParam(RDX);
+	handleParam(R8);
+	handleParam(R9);
+
+#else // linux x64
+	handleParam(RDI);
+	handleParam(RSI);
+	handleParam(RDX);
+	handleParam(RCX);
+	handleParam(R8);
+	handleParam(R9);
 #endif
+#endif
+	for (auto i = 0u; arg_count < count ; i++) 
+	{
+		auto arg = static_cast<app_pc>(0);
+		auto addr = reinterpret_cast<ADDRINT*>((RSP + (i + 0) * sizeof(ADDRINT)));
+		fast_safe_read(addr, sizeof(arg), &arg, nullptr);
+		handleParam(static_cast<app_pc>(arg),addr);
+	}
 	return dumped_args;
 }
 
 static void print_ret_addr(app_pc instr_addr, int instr_size) {
-	/*
-	dr_mcontext_t mc = {sizeof(mc), DR_MC_ALL};
-	dr_get_mcontext(dr_get_current_drcontext(), &mc);
-
-	reg_t *addr;
-	void *arg;
-	addr = (reg_t *) (mc.xsp);
-	fast_safe_read(addr, sizeof(arg), &arg);
-	fprintf(outf, "(ret:""%p"", xsp:""%p"")", arg, addr);
-	*/
 
 	fprintf(outf, "(ret:""%p"") ", instr_addr + instr_size);
 }
@@ -1314,7 +1397,7 @@ static bool library_matches_filter(IMG info)
 {
 	if (!op_only_to_lib.Value().empty()) {
 		string libname = IMG_Name(info);
-		return (!libname.empty() && strcasestr(libname.c_str(), op_only_to_lib.Value().c_str()) != NULL);
+		return (!libname.empty() && (strcasestr(libname.c_str(), op_only_to_lib.Value().c_str()) != NULL));
 	}
 	return true;
 }
@@ -1323,7 +1406,9 @@ static bool target_matches_filter(IMG info)
 {
 	if (!op_only_to_target.Value().empty()) {
 		string libname = IMG_Name(info);
-		return (!libname.empty() && strcasestr(libname.c_str(), op_only_to_target.Value().c_str()) != NULL);
+		const auto  ret= (!libname.empty() && (strcasestr(libname.c_str(), op_only_to_target.Value().c_str()) != NULL));
+		// fprintf(outf, "$$$ op_only_to_target=%s, libname=%s, match=%d\n", op_only_to_target.Value().c_str(), libname.c_str(), ret);
+		return ret;
 	}
 	return true;
 }
@@ -1355,8 +1440,8 @@ static void event_module_load(IMG info, VOID*)
 {
 	loaded(info);
 
-	//fprintf(outf, "!!! %s\n", IMG_Name(info).c_str());
-	char* remove_str = ":\\windows"; // use windows default path
+	// fprintf(outf, "!!! %s\n", IMG_Name(info).c_str());
+	char* remove_str = ":" DIR_SEP "windows"; // use windows default path
 	if (tracemode == UNIQUE && strcasestr(IMG_Name(info).c_str(), remove_str) == NULL) {
 		dlls.insert(IMG_Name(info));
 	}
@@ -1404,11 +1489,21 @@ static void event_module_load(IMG info, VOID*)
 	}
 }
 
-static void init_file_related(void) {
+static void init_file_related(void) 
+{
+#ifdef WINDOWS
 	file_related.push_back("CreateFile");
 	file_related.push_back("ReadFile");
 	file_related.push_back("SetFilePointer");
 	file_related.push_back("WriteFile");
+#else
+	file_related.push_back("fopen");
+	file_related.push_back("open");
+	file_related.push_back("fseek");
+	file_related.push_back("seek");
+	file_related.push_back("fclose");
+	file_related.push_back("close");
+#endif
 }
 
 static void open_log_file(void)
@@ -1418,12 +1513,13 @@ static void open_log_file(void)
 	}
 	else {
 		NATIVE_PID pid; OS_GetPid(&pid);
-		char filename[100];
-		sprintf(filename, "drltrace.%d.log", pid);
-		outf = fopen((logdir + "\\" + filename).c_str(), "wb");
+		char filename[MAXPATH];
+		OS_MkDir(logdir.c_str(),0777);
+		sprintf(filename, "%s" DIR_SEP "drltrace.%d.log", logdir.c_str(),pid);
+		outf = fopen(filename, "wb");
+		// printf( "drltrace log file is %s""\n", filename);
 		ASSERT(outf, "failed to open log file");
 		//setvbuf(outf, nullptr, _IONBF, 0);
-		VNOTIFY(0, "drltrace log file is %s""\n", buf);
 	}
 }
 
@@ -1431,10 +1527,15 @@ void reset_memdumnp_storage(void) {
 	const char memdump_pn[] = "memdump";
 	{
 		std::stringstream s;
+#ifdef WINDOWS
 		s << "cd \"" << logdir << "\" && rmdir /s /q " << memdump_pn;
+#else
+		s << "cd \"" << logdir << "\" && rm -rf " << memdump_pn;
+#endif
 		system(s.str().c_str());
 	}
-	OS_MkDir((logdir + "\\" + memdump_pn).c_str(), 0777);
+	auto the_logdir = (logdir + DIR_SEP + memdump_pn);
+	OS_MkDir(the_logdir.c_str(), 0777);
 }
 
 static void open_functype_file(void)
@@ -1472,8 +1573,8 @@ void drmodtrack_dump(FILE* out) {
 	int index = 0;
 	fprintf(outf, "Module Table: version 4, count %d\n", ss.size());
 	for (auto&& item : ss) {
-		fprintf(out, "%-3d, %-3d, 0x%08x, 0x%08x, 0x%08x, %016x, 0x%08x, 0x%08x,  %s\n",
-			index, index, item.start, item.end, item.entry, item.r1, item.r2, item.r3, item.path.c_str());
+		fprintf(out, "%-3d, %-3d, %017p, %017p, %017p, %017p, %017p, %017p,  %s\n",
+			index, index, item.start, item.end, item.entry, (void*)item.r1, (void*)item.r2, (void*)item.r3, item.path.c_str());
 		index++;
 	}
 }
@@ -1508,12 +1609,14 @@ int main(int argc, CHAR** argv)
 		return print_usage();
 	}
 
-#define MAXPATH 0x1000
-	char logdir_buf[MAXPATH] = {};
+	char logdir_buf[MAXPATH] = {'.'};
+#ifdef WINDOWS
 	if (!W::GetFullPathNameA(op_logdir.Value().c_str(), MAXPATH, logdir_buf, NULL)) {
 		return print_usage();
 	}
-
+#else
+	strcpy(logdir_buf,op_logdir.Value().c_str());
+#endif
 	logdir = logdir_buf;
 
 	PIN_InitSymbols();
@@ -1561,33 +1664,45 @@ int main(int argc, CHAR** argv)
 		tracemode = DOMINATOR;
 	}
 
+#ifdef WINDOWS
 	current_process = W::GetCurrentProcess();
+#else
+	current_process = open("/proc/self/mem", O_RDONLY);
+#endif
 	PIN_StartProgram();
 }
 
 static VOID event_app_instruction(TRACE trace, VOID*)
 {
+#ifdef X64
+	const int spreg=REG_RSP;
+	const int retreg=REG_RAX;
+#else
+	// x32
+	const int spreg=REG_ESP;
+	const int retreg=REG_EAX;
+#endif
 	for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)) {
 
 		for (INS instr = BBL_InsHead(bbl); INS_Valid(instr); instr = INS_Next(instr)) {
 			auto next_addr = INS_Address(instr) + INS_Size(instr);
 			if (INS_IsDirectCall(instr)) {
 				INS_InsertCall(instr, IPOINT_BEFORE, (AFUNPTR)at_call, IARG_FAST_ANALYSIS_CALL
-					, IARG_INST_PTR, IARG_BRANCH_TARGET_ADDR, IARG_REG_VALUE, REG_ESP, IARG_THREAD_ID, IARG_ADDRINT, next_addr, IARG_END);
+					, IARG_INST_PTR, IARG_BRANCH_TARGET_ADDR, IARG_REG_VALUE, spreg, IARG_THREAD_ID, IARG_ADDRINT, next_addr, PINARGS, IARG_END);
 			}
 
 			else if (INS_IsRet(instr)) {
 				INS_InsertCall(instr, IPOINT_BEFORE, (AFUNPTR)at_return, IARG_FAST_ANALYSIS_CALL
-					, IARG_INST_PTR, IARG_BRANCH_TARGET_ADDR, IARG_REG_VALUE, REG_ESP, IARG_REG_VALUE, REG_EAX, IARG_THREAD_ID, IARG_END);
+					, IARG_INST_PTR, IARG_BRANCH_TARGET_ADDR, IARG_REG_VALUE, spreg, IARG_REG_VALUE, retreg, IARG_THREAD_ID, IARG_END);
 			}
 
 			else if (INS_IsIndirectControlFlow(instr)) {
 				if (INS_Opcode(instr) != XED_ICLASS_JMP)
 				INS_InsertCall(instr, IPOINT_BEFORE, (AFUNPTR)at_call_ind, IARG_FAST_ANALYSIS_CALL
-					, IARG_INST_PTR, IARG_BRANCH_TARGET_ADDR, IARG_REG_VALUE, REG_ESP, IARG_THREAD_ID, IARG_ADDRINT, next_addr, IARG_END);
+					, IARG_INST_PTR, IARG_BRANCH_TARGET_ADDR, IARG_REG_VALUE, spreg, IARG_THREAD_ID, IARG_ADDRINT, next_addr, PINARGS, IARG_END);
 				else
 					INS_InsertCall(instr, IPOINT_BEFORE, (AFUNPTR)at_jmp_ind, IARG_FAST_ANALYSIS_CALL
-					, IARG_INST_PTR, IARG_BRANCH_TARGET_ADDR, IARG_REG_VALUE, REG_ESP, IARG_THREAD_ID, IARG_END);
+					, IARG_INST_PTR, IARG_BRANCH_TARGET_ADDR, IARG_REG_VALUE, spreg, IARG_THREAD_ID, PINARGS, IARG_END);
 			}
 
 		}

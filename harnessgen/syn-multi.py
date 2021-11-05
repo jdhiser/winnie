@@ -295,12 +295,9 @@ def main():
 
     # Start harness synthesizer
     if args.action == 'harness':
-        cor_trace_1 = glob.glob(os.path.join(
-            args.trace_dir, MAIN_TRACE) + "/*.log")[0]
-        cor_trace_2 = glob.glob(os.path.join(
-            args.trace_dir, SECOND_TRACE) + "/*.log")[0]
-        diff_trace = glob.glob(os.path.join(
-            args.trace_dir, DIFF_TRACE) + "/*.log")[0]
+        cor_trace_1 = glob.glob(os.path.join( args.trace_dir, MAIN_TRACE) + "/*.log")[0]
+        cor_trace_2 = glob.glob(os.path.join( args.trace_dir, SECOND_TRACE) + "/*.log")[0]
+        diff_trace = glob.glob(os.path.join( args.trace_dir, DIFF_TRACE) + "/*.log")[0]
 
         dumpdir = os.path.join(args.trace_dir, MAIN_TRACE, "memdump")
         dumpdir2 = os.path.join(args.trace_dir, SECOND_TRACE, "memdump")

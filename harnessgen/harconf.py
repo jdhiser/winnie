@@ -4,7 +4,13 @@ import os
 # for functype manager; it invokes an IDAPython script
 # TODO: edit this if it doesn't work
 ROOT = os.path.dirname(__file__)
-IDA_PATH = glob.glob(r'C:\Program Files\IDA *\idat.exe')[0]
+
+# windows 
+# IDA_PATH = glob.glob(r'C:\Program Files\IDA *\idat.exe')[0]
+# linux
+IDA_PATH = glob.glob(os.environ['IDAROOT']+'/idat64')[0]
+
+
 IDA_SCRIPT = os.path.join(ROOT, 'util/ida_func_type.py')
 FUNCTYPE_CACHE_PATH = os.path.join(ROOT, 'cache')
 

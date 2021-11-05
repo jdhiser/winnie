@@ -5,6 +5,7 @@ import json
 import hashlib
 import os
 import bisect
+import pprint
 from harconf import *
 from template import *
 from util import strings, u32
@@ -100,6 +101,7 @@ class Functype:
                 ret_type = funcinfo['ret_type']
                 convention = funcinfo['cc']
                 args = [arg['type'] for arg in funcinfo['args']]
+                # print("// Parsed ", funcname, "@", hex(addr), " type: ", args, " -> ", ret_type);
 
                 self.functypes_by_addr[addr] = \
                     self.functypes_by_name[funcname] = \
@@ -180,11 +182,11 @@ class FunctypeManager:
         command += ['-o' + cache_idb, path] if not os.path.isfile(cache_idb) else [cache_idb]
 
         if not os.path.isfile(cache_out):
-            print(f"Generating function types for {path.decode()} ...")
+            # print(f"Generating function types for {path.decode()} ...")
             subprocess.run(command,
                            env={'TVHEADLESS': '1', 'DESTPATH': cache_out, **os.environ})
-        else:
-            print(f"Found cached function types for {path.decode()} !")
+        # else:
+        #   print(f"Found cached function types for {path.decode()} !")
 
         if not os.path.isfile(cache_out):
             raise Exception(f"Generating function type for {path} failed!\nCommand: {command}")
@@ -270,6 +272,7 @@ class Trace:
             # remove if None
             calltrace = {k: v for k, v in calltrace.items() if v is not None}
             rettrace = {k: v for k, v in rettrace.items() if v is not None}
+            print("// modules=", modules)
 
         self.calltrace, self.rettrace = calltrace, rettrace
 
@@ -290,6 +293,9 @@ class Trace:
             else:
                 pointer_type = "D"
                 actual_value = int(value.strip().split(b" ")[0], 16)
+            #print("Found arg");
+            #pprint.pprint(vars(actual_value));
+            #pprint.pprint(vars(pointer_type));
             out.append((actual_value, pointer_type))
 
         return out
@@ -349,6 +355,7 @@ class Trace:
             numargs = fi.argsize
 
         # XXX: Tracer decides the maximum argument size
+        # print("Printing min({},{}) arguments".format(numargs, len(arg_lines)))
         numargs = min(numargs, len(arg_lines))
 
         if parse_args:
@@ -484,6 +491,10 @@ class Synthesizer:
         self.body = []
         self.defined_func = []
         self.history = {}
+        #print("Synthesizer=")
+        #pprint.pprint(vars(self))
+        #print("Synthesizer.trace=")
+        #pprint.pprint(vars(self.trace))
 
     def emit_code(self, out_pn=None):
         header = HEADER.replace("{typedef}", '\n'.join(self.defined_types))
@@ -510,6 +521,8 @@ class Synthesizer:
             te = self.trace.calltrace[cid]
             funcname = te.dst_symbol
             mod, mod_base, _ = self.trace.find_module(te.dst_addr)
+            if not mod:
+                print("Cannot find module for {}".format(hex(te.dst_addr)));
             assert mod
             funcinfo = self.functype_manager.get(mod).by_addr(te.dst_addr - mod_base)
             args = funcinfo.args
@@ -635,14 +648,19 @@ class Synthesizer:
         need_to_define = []
         arguments = []
         pointer_defined_flag = False
+        # print("args={}".format(args));
 
         # 1) will use raw value (basically)
         # 2) if pointer, we define variable and pass the address
         # 3) if pointer indicates 0, we allocate heap with 1000 size
+        print("// In ret_arg_code  with {} arguments".format(len(args)));
         for x in range(len(args)):
+            print("// Handling argument[{}]={}".format(x,args[x]));
             pointer_defined_flag = False
             # data pointer
             if args[x][0][1] == 'DP':
+                print("// arg is DP, arg=", end='')
+                pprint.pprint(args[x])
                 # TODO: consider data-type when unpack
 
                 # 1) infer filename argument (if the string contains filename information)
@@ -652,7 +670,10 @@ class Synthesizer:
                     continue
                 else:
                     dumped = hex(u32(args_dump[x][0]))
+                    print("// dumped=", dumped)
+                print("// args_type[...]=", args_type)
                 _type = args_type[x].replace("*", "")
+                print("// _type=", _type)
 
                 # 1-1) infer chuck of actual sample is used in the function
                 # TODO
@@ -728,15 +749,21 @@ class Synthesizer:
                         args[x][1][0], cid, internal_use=True)
                     # print "pointer", __result
                     __result_arg = self.check_searched_result(__result, "arg")
-                    # print __result_arg
 
                     if __result_arg is not None:
 
+                        print("// __result_arg=", end='')
+                        print(__result_arg)
                         result_cid = __result_arg[1]
                         result_arg = __result_arg[2]
-
+                        print("// result_cid=", end='');
+                        print(result_cid);
+                        print("// result_arg=", end='');
+                        print(result_arg);
                         # history = {cid: (need_to_define, arguments)}
                         # print "DEBUG", result_cid, result_arg, self.history, self.history[result_cid][1]
+                        print('//self.history=', end='')
+                        print(self.history)
                         previous_argument = self.history[result_cid][1][result_arg]
                         addr_previous_argument = self.ret_addr_of_var(
                             previous_argument)

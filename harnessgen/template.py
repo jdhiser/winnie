@@ -13,20 +13,38 @@ HEADER = """
 #include <stdio.h>
 #include <string.h> 
 #include <stdlib.h> 
+#ifdef WINDOWS
 #include <intrin.h>
 #include <windows.h>
 #include <tchar.h>
 #include <strsafe.h>
+#else
+#include <unistd.h>
+#include <dlfcn.h>
+#endif
 
 #define dbg_printf (void)printf
 
 // Macro to help to loading functions
+
+#ifdef WINDOWS
+HMODULE dlllib;
 #define LOAD_FUNC(h, n)                                 \\
     n##_func = (n##_func_t)GetProcAddress(h, #n);       \\
-    if (!n##_func) {                                    \\
-        dbg_printf("failed to load function " #n "\\n"); \\
-        exit(1);                                        \\
-    }                                                   
+    if (!n##_func) {                                        \\
+        dbg_printf("failed to load function " #n "\\n");    \\
+        exit(1);                                            \\
+    }                                                  
+#else
+#define __cdecl
+void* dlllib;
+#define LOAD_FUNC(h, n)                     \\
+    n##_func = (n##_func_t)dlsym(h, #n);    \\
+    if (!n##_func) {                                        \\
+        perror("failed to load function " #n "\\n");    \\
+        exit(1);                                            \\
+    }                                                  
+#endif
 
 // Macro help creating unique nop functions
 #define NOP(x)                                                      \\
@@ -35,7 +53,6 @@ HEADER = """
         return (DWORD)x;                                            \\
     }
 
-HMODULE dlllib;
 
 {typedef}
 
@@ -60,11 +77,21 @@ int main(int argc, char ** argv)
         exit(1);
     }
 
-    dlllib = LoadLibraryA("%s");
+    const char libFilename[]="%s";
+#ifdef WINDOWS
+    dlllib = LoadLibraryA(libFilename);
     if (dlllib == NULL){
         dbg_printf("failed to load library, gle = %d\\n", GetLastError());
         exit(1);
     }
+#else
+    dlllib = dlopen(libFilename, RTLD_LAZY);
+    if (dlllib == NULL){
+        perror("failed to load library");
+        exit(1);
+    }
+#endif
+
 
     char * filename = argv[1];    
     fuzz_me(filename);    

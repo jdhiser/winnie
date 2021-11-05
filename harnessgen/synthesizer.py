@@ -2,6 +2,7 @@
 import argparse
 import operator
 import signal
+import pprint
 from util import exit_gracefully
 
 from logger import *
@@ -53,15 +54,23 @@ class SingleSynthesizer(Synthesizer):
 
         # 1) we need to handle used argument (raw value and pointer, ret-chain)
         for cid in self.trace.cid_sequence:
+            # print("build_body for CALLID[{0:05d}]".format(cid))
+
             variables = []  # defined variables: e.g., int a=0
             arguments = []  # used arguments: func(&a)
+            #print("Doing calltrace=");
+            #pprint.pprint(vars(self.trace.calltrace[cid]));
             calltrace = self.trace.calltrace[cid]
+            # print("Doing rettrace");
+            # pprint.pprint(vars(self.trace.rettrace[cid]));
             rettrace = self.trace.rettrace[cid]
+            # print("Doing funcname");
             funcname = calltrace.dst_symbol.decode()
 
             fi = self.trace.find_function(calltrace.dst_addr)
             ret_type = fi.ret_type
             args_type = fi.args
+            print("// handling call to ", hex(calltrace.dst_addr), ", type= ", args_type, " -> ", ret_type)
 
             args = calltrace.args
             args_dump = calltrace.args_dump
@@ -113,7 +122,7 @@ def main():
                             default=None, help="name of the starting function to process",
                             required=False)
     har_parser.add_argument("-sample", "--sample-name", dest="sample_name", type=str,
-                            default=None, help="name of the original sample name",
+                            default="orig", help="name of the original sample name",
                             required=False)
     har_parser.set_defaults(action='harness')
 

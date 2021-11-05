@@ -10,6 +10,7 @@ python3 -m pip install -r requirements.txt
 
 - Install pintools
 
+Windows:
 ```sh
 cd {repo}/lib
 wget https://software.intel.com/sites/landingpage/pintool/downloads/pin-3.13-98189-g60a6ef199-msvc-windows.zip
@@ -18,19 +19,32 @@ mv pin-3.13-98189-g60a6ef199-msvc-windows pin
 rm -f pin-3.13-98189-g60a6ef199-msvc-windows.zip
 ```
 
+Linux:
+```sh
+cd {repo}
+wget https://software.intel.com/sites/landingpage/pintool/downloads/pin-3.21-98484-ge7cd811fd-gcc-linux.tar.gz
+tar xvf pin-3.21-98484-ge7cd811fd-gcc-linux.tar.gz
+mv pin-3.21-98484-ge7cd811fd-gcc-linux pin
+rm -f pin-3.21-98484-ge7cd811fd-gcc-linux.tar.gz
+```
+
 - Copy the tracer source code to pintools
 
 ```sh
-cd {repo}/lib
-cp -r Tracer pin/source/tools
 ```
 
 - Compile the tracer (with pintools)
-  - Open Tracer.sln with visual studio
-  - Open library_trace.cpp and modify `_WINDOWS_H_PATH_` to a proper path (line 2)
-  - If you are using VS2017, you should modify platform toolset (under Property - General - Platform Toolset)
-  - Build the solution
-  - Test
+  - Windows
+    - `cd {repo}/lib`
+    - `cp -r Tracer pin/source/tools`
+    - Open Tracer.sln with visual studio
+    - Open library_trace.cpp and modify `_WINDOWS_H_PATH_` to a proper path (line 2)
+    - If you are using VS2017, you should modify platform toolset (under Property - General - Platform Toolset)
+    - Build the solution
+    - Test
+  - Linux
+    - `cd {repo}/lib/Tracer`
+    - run `./buildit.sh`
 
 ## Collect Dynamic Run Traces & Harness generation
 
@@ -41,11 +55,18 @@ Then we run a program with PIN-based tracer to
 
 ```sh
 # Trace API calls
+#windows 
 pin.exe -t source/tools/Tracer/Release/Tracer.dll ^
   -logdir "cor1_1" -trace_mode "all" ^
   -only_to_target "test.exe" -only_to_lib "test.dll" ^
-  -- test.exe input1
+# or, Linux
+cd {repo}/samples/toy_example_lin
+./buildit.sh
+../../pin/pin -t ../../harnessgen/lib/Tracer/library_trace.so -logdir "cor1_1" -trace_mode "all" -only_to_target "toy_example" -only_to_lib "example_library.so" -- ./toy_example in/input
+```
 
+And run the synthesizer:
+```
 # Run harness synthesizer on single trace which starts from START_FUNCTION(...)
 python3 synthesizer.py harness -t cor1_1/drltrace.PID.log -d cor1_1/memdump -s START_FUNCTION
 ```
